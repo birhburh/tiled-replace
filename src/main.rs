@@ -1,6 +1,11 @@
+use quick_xml::events::BytesDecl;
+use quick_xml::events::BytesText;
+use quick_xml::events::Event;
+use quick_xml::Writer;
 use quick_xml::{de::from_str, se::to_string};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Cursor;
 
 mod serialize_as_string {
     use csv::{self, Terminator};
@@ -133,11 +138,14 @@ fn main() {
     let contents = fs::read_to_string("../airplane-mode/assets_src/airplane.tmx")
         .expect("Should have been able to read the file");
     let mut map: Map = from_str(&contents).unwrap();
-    // dbg!(&map);
-    // dbg!(&map);
     let layer = &mut map.layer[0];
-    // dbg!(&layer.data);
     layer.data.data[0][0] = 11;
-    // dbg!(&layer.data);
-    println!("{}", to_string(&layer.data).unwrap());
+
+    let mut writer = Writer::new(Cursor::new(Vec::new()));
+    writer.write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)));
+
+    writer.write_serializable("map", &map);
+    let xml = writer.into_inner().into_inner();
+    let xml_str = String::from_utf8_lossy(&xml);
+    println!("{}", xml_str);
 }
