@@ -1,15 +1,14 @@
+use quick_xml::de::from_str;
 use quick_xml::events::BytesDecl;
-use quick_xml::events::BytesText;
 use quick_xml::events::Event;
 use quick_xml::Writer;
-use quick_xml::{de::from_str, se::to_string};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Cursor;
 
 mod serialize_as_string {
     use csv::{self, Terminator};
-    use serde::{self, Deserialize, Deserializer, Serialize, Serializer};
+    use serde::{self, Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S>(d: &Vec<Vec<u32>>, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -17,7 +16,8 @@ mod serialize_as_string {
     {
         let mut res = String::new();
 
-        for record in d {
+        let len = d.len();
+        for (i, record) in d.iter().enumerate() {
             let mut v = Vec::new();
             let mut w = csv::WriterBuilder::new()
                 .has_headers(false)
@@ -25,6 +25,9 @@ mod serialize_as_string {
                 .from_writer(&mut v);
             w.serialize(record).map_err(serde::ser::Error::custom)?;
             drop(w);
+            if i == len - 1 {
+                v.pop();
+            }
             let mut s = String::from_utf8(v).map_err(serde::ser::Error::custom)?;
             s.push_str("\n");
             res.push_str(&s);
@@ -67,6 +70,18 @@ struct Image {
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
+struct Export {
+    #[serde(rename = "@target")]
+    target: String,
+    #[serde(rename = "@format")]
+    format: String,
+}
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+struct EditorSettings {
+    export: Export,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 struct TileSet {
     #[serde(rename = "@firstgid")]
     firstgid: u32,
@@ -83,7 +98,7 @@ struct TileSet {
     image: Image,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Default, Debug, Serialize, Deserialize, PartialEq)]
 struct Data {
     #[serde(rename = "@encoding")]
     encoding: String,
@@ -91,7 +106,7 @@ struct Data {
     data: Vec<Vec<u32>>,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Default, Debug, Serialize, Deserialize, PartialEq)]
 struct Layer {
     #[serde(rename = "@id")]
     id: u32,
@@ -101,6 +116,10 @@ struct Layer {
     width: u32,
     #[serde(rename = "@height")]
     height: u32,
+    #[serde(rename = "@offsetx", default)]
+    offsetx: u32,
+    #[serde(rename = "@offsety", default)]
+    offsety: u32,
     data: Data,
 }
 
@@ -130,6 +149,7 @@ struct Map {
     nextlayerid: u32,
     #[serde(rename = "@nextobjectid")]
     nextobjectid: u32,
+    editorsettings: EditorSettings,
     tileset: TileSet,
     layer: Vec<Layer>,
 }
@@ -141,10 +161,13 @@ fn main() {
     let layer = &mut map.layer[0];
     layer.data.data[0][0] = 11;
 
-    let mut writer = Writer::new(Cursor::new(Vec::new()));
-    writer.write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)));
-
-    writer.write_serializable("map", &map);
+    let mut writer = Writer::new_with_indent(Cursor::new(Vec::new()), ' ' as u8, 1);
+    writer
+        .write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))
+        .expect("cannot write xml header");
+    writer
+        .write_serializable("map", &map)
+        .expect("cannot serialize map");
     let xml = writer.into_inner().into_inner();
     let xml_str = String::from_utf8_lossy(&xml);
     println!("{}", xml_str);
