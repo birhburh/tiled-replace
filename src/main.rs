@@ -1,3 +1,4 @@
+use clap::Parser;
 use quick_xml::de::from_str;
 use quick_xml::events::BytesDecl;
 use quick_xml::events::Event;
@@ -5,6 +6,7 @@ use quick_xml::Writer;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Cursor;
+use std::path::PathBuf;
 
 mod serialize_as_string {
     use csv::{self, Terminator};
@@ -29,7 +31,9 @@ mod serialize_as_string {
                 v.pop();
             }
             let mut s = String::from_utf8(v).map_err(serde::ser::Error::custom)?;
-            s.push_str("\n");
+            if i != len - 1 {
+                s.push_str("\n");
+            }
             res.push_str(&s);
         }
         serializer.serialize_str(&res)
@@ -59,6 +63,20 @@ mod serialize_as_string {
     }
 }
 
+#[derive(Parser)]
+#[command(author, version, about, long_about = None)]
+struct Cli {
+    /// Input .tmx file
+    file: PathBuf,
+    /// Tile to find
+    find: u32,
+    /// Tile to replace with
+    replace: u32,
+
+    /// Save result to file itself
+    #[arg(short, long)]
+    in_place: bool,
+}
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 struct Image {
     #[serde(rename = "@source")]
@@ -155,11 +173,20 @@ struct Map {
 }
 
 fn main() {
-    let contents = fs::read_to_string("../airplane-mode/assets_src/airplane.tmx")
-        .expect("Should have been able to read the file");
+    let cli = Cli::parse();
+
+    let contents =
+        fs::read_to_string(cli.file).expect("Should have been able to read the file");
     let mut map: Map = from_str(&contents).unwrap();
-    let layer = &mut map.layer[0];
-    layer.data.data[0][0] = 11;
+    for layer in &mut map.layer {
+        for row in &mut layer.data.data.iter_mut() {
+            for cell in row.iter_mut() {
+                if *cell == cli.find {
+                    *cell = cli.replace;
+                }
+            }
+        }
+    }
 
     let mut writer = Writer::new_with_indent(Cursor::new(Vec::new()), ' ' as u8, 1);
     writer
