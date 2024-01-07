@@ -207,7 +207,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tiled-replace"
+name = "tmx-util"
 version = "0.1.0"
 dependencies = [
  "clap",

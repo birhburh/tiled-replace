@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use quick_xml::de::from_str;
 use quick_xml::events::BytesDecl;
 use quick_xml::events::Event;
@@ -63,20 +63,35 @@ mod serialize_as_string {
     }
 }
 
-#[derive(Parser)]
+#[derive(Debug, Subcommand)]
+enum Commands {
+    /// Replace tile on all layers
+    Replace {
+        /// Tile to find
+        find: u32,
+
+        /// Tile to replace with
+        replace: u32,
+    },
+    /// Resize tileset and update all tiles
+    /// (old values are from tmx file)
+    Resize { tilecount: u32, columns: u32 },
+}
+
+#[derive(Debug, Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
     /// Input .tmx file
     file: PathBuf,
-    /// Tile to find
-    find: u32,
-    /// Tile to replace with
-    replace: u32,
+
+    #[command(subcommand)]
+    command: Commands,
 
     /// Save result to file itself
     #[arg(short, long)]
     in_place: bool,
 }
+
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 struct Image {
     #[serde(rename = "@source")]
@@ -175,17 +190,33 @@ struct Map {
 fn main() {
     let cli = Cli::parse();
 
-    let contents =
-        fs::read_to_string(cli.file).expect("Should have been able to read the file");
+    let contents = fs::read_to_string(cli.file).expect("Should have been able to read the file");
     let mut map: Map = from_str(&contents).unwrap();
     for layer in &mut map.layer {
         for row in &mut layer.data.data.iter_mut() {
             for cell in row.iter_mut() {
-                if *cell == cli.find {
-                    *cell = cli.replace;
+                match cli.command {
+                    Commands::Replace { find, replace } => {
+                        if *cell != 0 && *cell - 1 == find {
+                            *cell = replace;
+                        }
+                    }
+                    Commands::Resize { tilecount, columns } => {
+                        if *cell >= map.tileset.columns {
+                            *cell +=
+                                (*cell - 1) / map.tileset.columns * (columns - map.tileset.columns);
+                        }
+                    }
                 }
             }
         }
+    }
+    match cli.command {
+        Commands::Resize { tilecount, columns } => {
+            map.tileset.columns = columns;
+            map.tileset.tilecount = tilecount;
+        }
+        _ => (),
     }
 
     let mut writer = Writer::new_with_indent(Cursor::new(Vec::new()), ' ' as u8, 1);
