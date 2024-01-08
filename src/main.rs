@@ -11,11 +11,33 @@ use std::path::PathBuf;
 mod serialize_as_string {
     use csv::{self, Terminator};
     use serde::{self, Deserialize, Deserializer, Serializer};
+    use std::fmt::Write;
+
+    fn print_type_of<T>(_: &T) {
+        println!("{}", std::any::type_name::<T>())
+    }
+
+    trait SerType {
+        fn ser_type() -> String;
+    }
+
+    impl<T: Write> SerType for quick_xml::se::Serializer<'_, '_, T> {
+        fn ser_type() -> String {
+            "XML".to_string()
+        }
+    }
+
+    impl<T: Write> SerType for serde_json::Serializer<T> {
+        fn ser_type() -> String {
+            "JSON".to_string()
+        }
+    }
 
     pub fn serialize<S>(d: &Vec<Vec<u32>>, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
+        print_type_of(&serializer);
         let mut res = String::new();
 
         let len = d.len();
@@ -63,7 +85,7 @@ mod serialize_as_string {
     }
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, Subcommand, PartialEq)]
 enum Commands {
     /// Replace tile on all layers
     Replace {
@@ -76,6 +98,8 @@ enum Commands {
     /// Resize tileset and update all tiles
     /// (old values are from tmx file)
     Resize { tilecount: u32, columns: u32 },
+    /// Convert .tmx file to .json
+    Convert,
 }
 
 #[derive(Debug, Parser)]
@@ -142,7 +166,7 @@ struct Data {
 #[derive(Default, Debug, Serialize, Deserialize, PartialEq)]
 struct Layer {
     #[serde(rename = "@id")]
-    id: u32,
+    id: Option<u32>,
     #[serde(rename = "@name")]
     name: String,
     #[serde(rename = "@width")]
@@ -161,7 +185,7 @@ struct Map {
     #[serde(rename = "@version")]
     version: String,
     #[serde(rename = "@tiledversion")]
-    tiledversion: String,
+    tiledversion: Option<String>,
     #[serde(rename = "@orientation")]
     orientation: String,
     #[serde(rename = "@renderorder")]
@@ -175,14 +199,14 @@ struct Map {
     #[serde(rename = "@tileheight")]
     tileheight: u32,
     #[serde(rename = "@infinite")]
-    infinite: u32,
+    infinite: Option<u32>,
     #[serde(rename = "@backgroundcolor")]
-    backgroundcolor: String,
+    backgroundcolor: Option<String>,
     #[serde(rename = "@nextlayerid")]
-    nextlayerid: u32,
+    nextlayerid: Option<u32>,
     #[serde(rename = "@nextobjectid")]
     nextobjectid: u32,
-    editorsettings: EditorSettings,
+    editorsettings: Option<EditorSettings>,
     tileset: TileSet,
     layer: Vec<Layer>,
 }
@@ -192,41 +216,47 @@ fn main() {
 
     let contents = fs::read_to_string(cli.file).expect("Should have been able to read the file");
     let mut map: Map = from_str(&contents).unwrap();
-    for layer in &mut map.layer {
-        for row in &mut layer.data.data.iter_mut() {
-            for cell in row.iter_mut() {
-                match cli.command {
-                    Commands::Replace { find, replace } => {
-                        if *cell != 0 && *cell - 1 == find {
-                            *cell = replace;
+    if cli.command == Commands::Convert {
+        let res = serde_json::to_string_pretty(&map).unwrap();
+        println!("{}", res);
+    } else {
+        for layer in &mut map.layer {
+            for row in &mut layer.data.data.iter_mut() {
+                for cell in row.iter_mut() {
+                    match cli.command {
+                        Commands::Replace { find, replace } => {
+                            if *cell != 0 && *cell - 1 == find {
+                                *cell = replace + 1;
+                            }
                         }
-                    }
-                    Commands::Resize { tilecount, columns } => {
-                        if *cell >= map.tileset.columns {
-                            *cell +=
-                                (*cell - 1) / map.tileset.columns * (columns - map.tileset.columns);
+                        Commands::Resize { tilecount, columns } => {
+                            if *cell >= map.tileset.columns {
+                                *cell += (*cell - 1) / map.tileset.columns
+                                    * (columns - map.tileset.columns);
+                            }
                         }
+                        _ => (),
                     }
                 }
             }
         }
-    }
-    match cli.command {
-        Commands::Resize { tilecount, columns } => {
-            map.tileset.columns = columns;
-            map.tileset.tilecount = tilecount;
+        match cli.command {
+            Commands::Resize { tilecount, columns } => {
+                map.tileset.columns = columns;
+                map.tileset.tilecount = tilecount;
+            }
+            _ => (),
         }
-        _ => (),
-    }
 
-    let mut writer = Writer::new_with_indent(Cursor::new(Vec::new()), ' ' as u8, 1);
-    writer
-        .write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))
-        .expect("cannot write xml header");
-    writer
-        .write_serializable("map", &map)
-        .expect("cannot serialize map");
-    let xml = writer.into_inner().into_inner();
-    let xml_str = String::from_utf8_lossy(&xml);
-    println!("{}", xml_str);
+        let mut writer = Writer::new_with_indent(Cursor::new(Vec::new()), ' ' as u8, 1);
+        writer
+            .write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))
+            .expect("cannot write xml header");
+        writer
+            .write_serializable("map", &map)
+            .expect("cannot serialize map");
+        let xml = writer.into_inner().into_inner();
+        let xml_str = String::from_utf8_lossy(&xml);
+        println!("{}", xml_str);
+    }
 }
