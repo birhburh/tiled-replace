@@ -4,33 +4,47 @@ use quick_xml::de::from_str;
 use quick_xml::events::BytesDecl;
 use quick_xml::events::Event;
 use quick_xml::Writer;
+use serde::ser::SerializeMap;
 use serde::ser::SerializeSeq;
 use serde::ser::SerializeStruct;
 use serde::Deserializer;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map as JsonMap, Value};
 use std::fs;
 use std::io::Cursor;
 use std::marker::PhantomData;
 use std::path::PathBuf;
 
-pub trait SerializationFormat {
-    fn serialize_data<'a, S>(items: &Vec<Vec<u32>>, serializer: S) -> Result<S::Ok, S::Error>
+trait SerializationFormat {
+    fn serialize_data<'a, S, T>(data: &Data<T>, serializer: S) -> Result<S::Ok, S::Error>
     where
+        T: SerializationFormat,
         S: serde::Serializer;
+    fn transform_image<'a, T>(image: &Image<T>) -> JsonMap<String, Value>
+    where
+        T: SerializationFormat;
+    fn transform_layers<'a, T>(
+        layers: &Vec<LayerType<T>>,
+        serialize_struct: &mut impl SerializeStruct,
+    ) where
+        T: SerializationFormat;
+    fn layer_type<'a, T>(layer: &LayerType<T>) -> Option<&str>
+    where
+        T: SerializationFormat;
     fn transform_name(name: &str) -> &str;
     fn transform_vec_name(name: &str) -> &str;
 }
 
-pub struct XmlFormat;
+struct XmlFormat;
 impl SerializationFormat for XmlFormat {
-    fn serialize_data<'a, S>(items: &Vec<Vec<u32>>, serializer: S) -> Result<S::Ok, S::Error>
+    fn serialize_data<'a, S, T>(data: &Data<T>, serializer: S) -> Result<S::Ok, S::Error>
     where
+        T: SerializationFormat,
         S: serde::Serializer,
     {
-        let mut res = String::new();
-
-        let len = items.len();
-        for (i, record) in items.iter().enumerate() {
+        let mut data_str = String::new();
+        let len = data.data.0.len();
+        for (i, record) in data.data.0.iter().enumerate() {
             let mut v = Vec::new();
             let mut w = csv::WriterBuilder::new()
                 .has_headers(false)
@@ -43,11 +57,66 @@ impl SerializationFormat for XmlFormat {
             }
             let mut s = String::from_utf8(v).map_err(serde::ser::Error::custom)?;
             if i != len - 1 {
-                s.push_str("\n");
+                s.push('\n');
             }
-            res.push_str(&s);
+            data_str.push_str(&s);
         }
-        serializer.serialize_str(&res)
+
+        let mut res = serializer.serialize_map(Some(2))?;
+        res.serialize_entry("@encoding", &data.encoding)?;
+        res.serialize_entry("$text", &data_str)?;
+        res.end()
+    }
+
+    fn transform_image<'a, T>(image: &Image<T>) -> JsonMap<String, Value>
+    where
+        T: SerializationFormat,
+    {
+        let mut res = JsonMap::new();
+        let mut inner = JsonMap::new();
+        inner.insert(
+            T::transform_name("@source").into(),
+            Value::String(image.source.clone()),
+        );
+        inner.insert(
+            T::transform_name("@width").into(),
+            Value::Number(image.width.into()),
+        );
+        inner.insert(
+            T::transform_name("@height").into(),
+            Value::Number(image.height.into()),
+        );
+        res.insert("image".into(), Value::Object(inner));
+        res
+    }
+
+    fn transform_layers<'a, T>(
+        layers: &Vec<LayerType<T>>,
+        serialize_struct: &mut impl SerializeStruct,
+    ) where
+        T: SerializationFormat,
+    {
+        use LayerType::*;
+
+        let _ = &layers.iter().for_each(|x| {
+            let _ = match x {
+                ObjectGroup(_) => {
+                    serialize_struct.serialize_field(T::transform_vec_name("objectgroups"), &x)
+                }
+                Layer(_) => serialize_struct.serialize_field(T::transform_vec_name("layers"), &x),
+                ImageLayer(_) => {
+                    serialize_struct.serialize_field(T::transform_vec_name("imagelayers"), &x)
+                }
+                Group(_) => serialize_struct.serialize_field(T::transform_vec_name("groups"), &x),
+            };
+        });
+    }
+
+    fn layer_type<'a, T>(_layer: &LayerType<T>) -> Option<&str>
+    where
+        T: SerializationFormat,
+    {
+        None
     }
 
     fn transform_name(name: &str) -> &str {
@@ -61,19 +130,53 @@ impl SerializationFormat for XmlFormat {
     }
 }
 
-pub struct JsonFormat;
+struct JsonFormat;
 impl SerializationFormat for JsonFormat {
-    fn serialize_data<'a, S>(items: &Vec<Vec<u32>>, serializer: S) -> Result<S::Ok, S::Error>
+    fn serialize_data<'a, S, T>(data: &Data<T>, serializer: S) -> Result<S::Ok, S::Error>
     where
+        T: SerializationFormat,
         S: serde::Serializer,
     {
         let mut ser = serializer.serialize_seq(None)?;
-        for row in items {
+        for row in &data.data.0 {
             for cell in row {
                 ser.serialize_element(cell)?;
             }
         }
         ser.end()
+    }
+
+    fn transform_image<'a, T>(image: &Image<T>) -> JsonMap<String, Value>
+    where
+        T: SerializationFormat,
+    {
+        let mut res = JsonMap::new();
+        res.insert("image".into(), Value::String(image.source.clone()));
+        res.insert("imagewidth".into(), Value::Number(image.width.into()));
+        res.insert("imageheight".into(), Value::Number(image.height.into()));
+        res
+    }
+
+    fn transform_layers<'a, T>(
+        layers: &Vec<LayerType<T>>,
+        serialize_struct: &mut impl SerializeStruct,
+    ) where
+        T: SerializationFormat,
+    {
+        let _ = serialize_struct.serialize_field(T::transform_vec_name("layers"), &layers);
+    }
+
+    fn layer_type<'a, T>(layer: &LayerType<T>) -> Option<&str>
+    where
+        T: SerializationFormat,
+    {
+        use LayerType::*;
+        Some(match layer {
+            Layer(_) => "tilelayer",
+            ImageLayer(_) => "imagelayer",
+            Group(_) => "group",
+            ObjectGroup(_) => "objectgroup",
+        })
     }
 
     fn transform_name(name: &str) -> &str {
@@ -255,15 +358,28 @@ where
     where
         S: serde::Serializer,
     {
-        let mut res = serializer.serialize_struct("tileset", 7)?;
-        res.serialize_field(T::transform_name("@firstgid"), &self.firstgid)?;
-        res.serialize_field(T::transform_name("@name"), &self.name)?;
-        res.serialize_field(T::transform_name("@tilewidth"), &self.tilewidth)?;
-        res.serialize_field(T::transform_name("@tileheight"), &self.tileheight)?;
-        res.serialize_field(T::transform_name("@tilecount"), &self.tilecount)?;
-        res.serialize_field(T::transform_name("@columns"), &self.columns)?;
-        res.serialize_field("image", &self.image)?;
+        let mut res = serializer.serialize_map(Some(7))?;
+        res.serialize_entry(T::transform_name("@firstgid"), &self.firstgid)?;
+        res.serialize_entry(T::transform_name("@name"), &self.name)?;
+        res.serialize_entry(T::transform_name("@tilewidth"), &self.tilewidth)?;
+        res.serialize_entry(T::transform_name("@tileheight"), &self.tileheight)?;
+        res.serialize_entry(T::transform_name("@tilecount"), &self.tilecount)?;
+        res.serialize_entry(T::transform_name("@columns"), &self.columns)?;
+        let image = T::transform_image(&self.image);
+        for (k, v) in image.into_iter() {
+            res.serialize_entry(&k, &v)?;
+        }
         res.end()
+    }
+}
+
+#[derive(Default, Debug, Deserialize, PartialEq)]
+#[serde(bound = "T: SerializationFormat")]
+struct DataField<T: SerializationFormat>(Vec<Vec<u32>>, PhantomData<T>);
+
+impl From<DataField<XmlFormat>> for DataField<JsonFormat> {
+    fn from(data: DataField<XmlFormat>) -> Self {
+        DataField::<JsonFormat>(data.0, Default::default())
     }
 }
 
@@ -273,13 +389,12 @@ struct Data<T: SerializationFormat> {
     #[serde(rename = "@encoding")]
     encoding: String,
     #[serde(rename = "$text", deserialize_with = "deserialize_csv")]
-    data: Vec<Vec<u32>>,
-    #[serde(skip)]
-    rest: PhantomData<T>,
+    data: DataField<T>,
 }
 
-pub fn deserialize_csv<'de, D>(deserializer: D) -> Result<Vec<Vec<u32>>, D::Error>
+fn deserialize_csv<'de, D, T>(deserializer: D) -> Result<DataField<T>, D::Error>
 where
+    T: SerializationFormat,
     D: Deserializer<'de>,
 {
     let mut res: Vec<Vec<u32>> = Vec::new();
@@ -298,7 +413,7 @@ where
         });
         res.append(&mut vals.collect::<Vec<_>>());
     }
-    Ok(res)
+    Ok(DataField(res, Default::default()))
 }
 
 impl<T> Serialize for Data<T>
@@ -309,7 +424,7 @@ where
     where
         S: serde::Serializer,
     {
-        T::serialize_data(&self.data, serializer)
+        T::serialize_data(&self, serializer)
     }
 }
 
@@ -317,8 +432,74 @@ impl From<Data<XmlFormat>> for Data<JsonFormat> {
     fn from(data: Data<XmlFormat>) -> Self {
         Data::<JsonFormat> {
             encoding: data.encoding,
-            data: data.data,
-            rest: Default::default(),
+            data: data.data.into(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(bound = "T: SerializationFormat")]
+enum LayerType<T: SerializationFormat> {
+    #[serde(rename = "layer")]
+    Layer(Layer<T>),
+    #[serde(rename = "imagelayer")]
+    ImageLayer(Layer<T>),
+    #[serde(rename = "group")]
+    Group(Layer<T>),
+    #[serde(rename = "objectgroup")]
+    ObjectGroup(Layer<T>),
+}
+
+impl<T> Serialize for LayerType<T>
+where
+    T: SerializationFormat,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let layer: &Layer<T> = match self {
+            LayerType::Layer(layer) => layer.into(),
+            LayerType::ImageLayer(layer) => layer.into(),
+            LayerType::Group(layer) => layer.into(),
+            LayerType::ObjectGroup(layer) => layer.into(),
+        };
+
+        let mut res = serializer.serialize_struct("layer", 8)?;
+        if let Some(layer_type) = T::layer_type(&self) {
+            res.serialize_field(T::transform_name("@type"), layer_type)?;
+        }
+        if let Some(id) = &layer.id {
+            res.serialize_field(T::transform_name("@id"), id)?;
+        }
+        res.serialize_field(T::transform_name("@name"), &layer.name)?;
+        if let Some(width) = &layer.width {
+            res.serialize_field(T::transform_name("@width"), width)?;
+        }
+        if let Some(height) = &layer.height {
+            res.serialize_field(T::transform_name("@height"), height)?;
+        }
+        if let Some(offsetx) = &layer.offsetx {
+            res.serialize_field(T::transform_name("@offsetx"), offsetx)?;
+        }
+        if let Some(offsety) = &layer.offsety {
+            res.serialize_field(T::transform_name("@offsety"), offsety)?;
+        }
+        if let Some(data) = &layer.data {
+            res.serialize_field("data", data)?;
+        }
+        res.end()
+    }
+}
+
+impl From<LayerType<XmlFormat>> for LayerType<JsonFormat> {
+    fn from(layer_type: LayerType<XmlFormat>) -> Self {
+        use LayerType::*;
+        match layer_type {
+            Layer(layer) => Layer(layer.into()),
+            ImageLayer(layer) => ImageLayer(layer.into()),
+            Group(layer) => Group(layer.into()),
+            ObjectGroup(layer) => ObjectGroup(layer.into()),
         }
     }
 }
@@ -331,38 +512,23 @@ struct Layer<T: SerializationFormat> {
     #[serde(rename = "@name")]
     name: String,
     #[serde(rename = "@width")]
-    width: u32,
+    width: Option<u32>,
     #[serde(rename = "@height")]
-    height: u32,
+    height: Option<u32>,
     #[serde(rename = "@offsetx", default)]
-    offsetx: u32,
+    offsetx: Option<u32>,
     #[serde(rename = "@offsety", default)]
-    offsety: u32,
-    data: Data<T>,
-}
-
-impl<T> Serialize for Layer<T>
-where
-    T: SerializationFormat,
-{
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let mut res = serializer.serialize_struct("layer", 7)?;
-        res.serialize_field(T::transform_name("@id"), &self.id)?;
-        res.serialize_field(T::transform_name("@name"), &self.name)?;
-        res.serialize_field(T::transform_name("@width"), &self.width)?;
-        res.serialize_field(T::transform_name("@height"), &self.height)?;
-        res.serialize_field(T::transform_name("@offsetx"), &self.offsetx)?;
-        res.serialize_field(T::transform_name("@offsety"), &self.offsety)?;
-        res.serialize_field("data", &self.data)?;
-        res.end()
-    }
+    offsety: Option<u32>,
+    data: Option<Data<T>>,
 }
 
 impl From<Layer<XmlFormat>> for Layer<JsonFormat> {
     fn from(layer: Layer<XmlFormat>) -> Self {
+        let data = if let Some(data) = layer.data {
+            Some(data.into())
+        } else {
+            None
+        };
         Layer::<JsonFormat> {
             id: layer.id,
             name: layer.name,
@@ -370,7 +536,7 @@ impl From<Layer<XmlFormat>> for Layer<JsonFormat> {
             height: layer.height,
             offsetx: layer.offsetx,
             offsety: layer.offsety,
-            data: layer.data.into(),
+            data,
         }
     }
 }
@@ -405,8 +571,8 @@ struct Map<T: SerializationFormat> {
     editorsettings: Option<EditorSettings<T>>,
     #[serde(rename = "tileset")]
     tilesets: Vec<TileSet<T>>,
-    #[serde(rename = "layer")]
-    layers: Vec<Layer<T>>,
+    #[serde(rename = "$value")]
+    layers: Vec<LayerType<T>>,
 }
 
 impl<T> Serialize for Map<T>
@@ -432,7 +598,7 @@ where
         res.serialize_field(T::transform_name("@nextobjectid"), &self.nextobjectid)?;
         res.serialize_field("editorsettings", &self.editorsettings)?;
         res.serialize_field(T::transform_vec_name("tilesets"), &self.tilesets)?;
-        res.serialize_field(T::transform_vec_name("layers"), &self.layers)?;
+        T::transform_layers(&self.layers, &mut res);
         res.end()
     }
 }
@@ -476,23 +642,36 @@ fn main() {
         let res = serde_json::to_string_pretty(&map).unwrap();
         println!("{res}");
     } else {
-        let tileset = map.tilesets.iter_mut().next().expect("Needs at least one tileset");
+        let tileset = map
+            .tilesets
+            .iter_mut()
+            .next()
+            .expect("Needs at least one tileset");
         for layer in &mut map.layers {
-            for row in &mut layer.data.data.iter_mut() {
-                for cell in row.iter_mut() {
-                    match cli.command {
-                        Commands::Replace { find, replace } => {
-                            if *cell != 0 && *cell - 1 == find {
-                                *cell = replace + 1;
+            use LayerType::*;
+            let layer = match layer {
+                Layer(layer) => layer,
+                ImageLayer(layer) => layer,
+                Group(layer) => layer,
+                ObjectGroup(layer) => layer,
+            };
+            if let Some(data) = &mut layer.data {
+                for row in &mut data.data.0.iter_mut() {
+                    for cell in row.iter_mut() {
+                        match cli.command {
+                            Commands::Replace { find, replace } => {
+                                if *cell != 0 && *cell - 1 == find {
+                                    *cell = replace + 1;
+                                }
                             }
-                        }
-                        Commands::Resize { columns, .. } => {
-                            if *cell >= tileset.columns {
-                                *cell += (*cell - 1) / tileset.columns
-                                    * (columns - tileset.columns);
+                            Commands::Resize { columns, .. } => {
+                                if *cell >= tileset.columns {
+                                    *cell +=
+                                        (*cell - 1) / tileset.columns * (columns - tileset.columns);
+                                }
                             }
+                            _ => (),
                         }
-                        _ => (),
                     }
                 }
             }
