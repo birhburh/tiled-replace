@@ -562,8 +562,8 @@ struct Map<T: SerializationFormat> {
     tileheight: u32,
     #[serde(rename = "@infinite")]
     infinite: Option<u32>,
-    #[serde(rename = "@backgroundcolor")]
-    backgroundcolor: Option<String>,
+    #[serde(rename = "@backgroundcolor", default)]
+    backgroundcolor: String,
     #[serde(rename = "@nextlayerid")]
     nextlayerid: Option<u32>,
     #[serde(rename = "@nextobjectid")]
