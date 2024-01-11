@@ -10,6 +10,7 @@ use serde::ser::SerializeStruct;
 use serde::Deserializer;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value};
+use std::error::Error;
 use std::fs;
 use std::io::Cursor;
 use std::marker::PhantomData;
@@ -206,7 +207,7 @@ enum Commands {
     },
     /// Resize tileset and update all tiles
     /// (old values are from tmx file)
-    Resize { tilecount: u32, columns: u32 },
+    Resize { columns: u32, tilecount: u32 },
     /// Convert .tmx file to .json
     Convert,
 }
@@ -585,18 +586,26 @@ where
     {
         let mut res = serializer.serialize_struct("map", 15)?;
         res.serialize_field(T::transform_name("@version"), &self.version)?;
-        res.serialize_field(T::transform_name("@tiledversion"), &self.tiledversion)?;
+        if let Some(tiledversion) = &self.tiledversion {
+            res.serialize_field(T::transform_name("@tiledversion"), tiledversion)?;
+        }
         res.serialize_field(T::transform_name("@orientation"), &self.orientation)?;
         res.serialize_field(T::transform_name("@renderorder"), &self.renderorder)?;
         res.serialize_field(T::transform_name("@width"), &self.width)?;
         res.serialize_field(T::transform_name("@height"), &self.height)?;
         res.serialize_field(T::transform_name("@tilewidth"), &self.tilewidth)?;
         res.serialize_field(T::transform_name("@tileheight"), &self.tileheight)?;
-        res.serialize_field(T::transform_name("@infinite"), &self.infinite)?;
+        if let Some(infinite) = &self.infinite {
+            res.serialize_field(T::transform_name("@infinite"), infinite)?;
+        }
         res.serialize_field(T::transform_name("@backgroundcolor"), &self.backgroundcolor)?;
-        res.serialize_field(T::transform_name("@nextlayerid"), &self.nextlayerid)?;
+        if let Some(nextlayerid) = &self.nextlayerid {
+            res.serialize_field(T::transform_name("@nextlayerid"), nextlayerid)?;
+        }
         res.serialize_field(T::transform_name("@nextobjectid"), &self.nextobjectid)?;
-        res.serialize_field("editorsettings", &self.editorsettings)?;
+        if let Some(editorsettings) = &self.editorsettings {
+            res.serialize_field("editorsettings", editorsettings)?;
+        }
         res.serialize_field(T::transform_vec_name("tilesets"), &self.tilesets)?;
         T::transform_layers(&self.layers, &mut res);
         res.end()
@@ -636,7 +645,11 @@ fn main() {
     let cli = Cli::parse();
 
     let contents = fs::read_to_string(cli.file).expect("Should have been able to read the file");
-    let mut map: Map<XmlFormat> = from_str(&contents).unwrap();
+    let mut map: Map<XmlFormat> = match from_str(&contents) {
+        Ok(map) => map,
+        Err(err) => panic!("{:?}", err),
+    };
+
     if cli.command == Commands::Convert {
         let map: Map<JsonFormat> = map.into();
         let res = serde_json::to_string_pretty(&map).unwrap();
@@ -666,8 +679,13 @@ fn main() {
                             }
                             Commands::Resize { columns, .. } => {
                                 if *cell >= tileset.columns {
-                                    *cell +=
-                                        (*cell - 1) / tileset.columns * (columns - tileset.columns);
+                                    let diff = (*cell - 1) as i32 / tileset.columns as i32
+                                        * (columns as i32 - tileset.columns as i32);
+                                    if diff.is_negative() {
+                                        *cell -= diff.wrapping_abs() as u32;
+                                    } else {
+                                        *cell += diff as u32;
+                                    };
                                 }
                             }
                             _ => (),
